@@ -13,7 +13,11 @@ from thefuzz import fuzz
 
 from bs4 import BeautifulSoup
 
+LANG = 'ja'
+SENTENCE_DELINEATORS = "。？！…〜"
 TRANSCR_POOL_SIZE = 8
+TRANSCR_MODEL = 'tiny'
+ALIGN_MODEL = 'large-v3'
 
 def read_chapter(chapter):
     soup = BeautifulSoup(chapter, 'html.parser')
@@ -21,7 +25,8 @@ def read_chapter(chapter):
     lines = [x for x in lines if x]
     lines = [x.replace('\u3000', "") for x in lines]
     text = "\n".join(lines)
-    text = text.replace("。","。\n")
+    for c in SENTENCE_DELINEATORS:
+        text = text.replace(c, c+"\n")
     return text
 
 def read_ebook(book_file):
@@ -32,8 +37,8 @@ def read_ebook(book_file):
     return chapters
 
 def transcribe_chapter(audio_file):
-    model = stable_whisper.load_model('tiny')
-    result = model.transcribe(audio_file, language='ja')
+    model = stable_whisper.load_model(TRANSCR_MODEL)
+    result = model.transcribe(audio_file, language=LANG)
     return (audio_file, result.to_txt())
 
 def transcribe_audiobook(audio_dir):
@@ -59,7 +64,7 @@ def transcribe_audiobook(audio_dir):
 
     with open(cache_file, 'w+') as f:
         print("writing transcripts to cache at "+str(cache_file))
-        json.dump(transcriptions, f)
+        json.dump(transcriptions, f, ensure_ascii=False)
     return transcriptions
 
 def match_files(transcriptions, chapters):
@@ -75,21 +80,36 @@ def match_files(transcriptions, chapters):
     return transcriptions
 
 
-def align(text, audio_file, model):
-    model = stable_whisper.load_model('base')
-    result = model.align(audio_file, text, language='ja', original_split=True)
+def align_chapter(text, audio_file, model, output_dir):
+    print(f"Aligning {audio_file}...\n\n\n")
+    result = model.align(audio_file, text, language=LANG, original_split=True)
     
-    print(result.to_srt_vtt(word_level=False))
-    print(result.to_txt())
+    output_file = output_dir + str(Path(audio_file).stem) + ".srt"
+    print(f"Writing subtitles to {output_file}")
+    with open(output_file, 'w+') as f:
+        f.write(result.to_srt_vtt(word_level=False))
+
+
+def align_book(matched_files, output_dir):
+    print("loading model...")
+    model = stable_whisper.load_model(ALIGN_MODEL)
+    for file, info in matched_files.items():
+        align_chapter(info['chapter'], file, model, output_dir)
 
 def main():
     input_dir = "./input/Book 1 mp3/"
+    output_dir = "./output/subtitles/"
     transcriptions = transcribe_audiobook(input_dir)
     chapters = read_ebook('./input/Book 1.epub')
     matched_files = match_files(transcriptions, chapters)
+
+    print("Audio files and their match scores for ebook chapters. Best < 70 or second best close to best means something might have gone wrong:")
     for file in matched_files.keys():
         info = matched_files[file]
         print(f"Best, second best: {info['best']}, {info['second']} for {file}")
+
+    print("\n\nAligning matched ebook chapters to the audio files:")
+    align_book(matched_files, output_dir)
 
 if __name__ == "__main__":
     main()
