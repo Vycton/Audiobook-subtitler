@@ -17,11 +17,15 @@ from bs4 import BeautifulSoup
 
 from subprocess import call
 
+import srt
+import datetime
+
 LANG = 'ja'
 SENTENCE_DELINEATORS = "。"
 TRANSCR_POOL_SIZE = 8
 TRANSCR_MODEL = 'tiny'
 ALIGN_MODEL = 'large-v3'
+PAD_SECONDS = .75
 
 
 def read_chapter(chapter):
@@ -169,6 +173,30 @@ def match_files_transcriptions(transcriptions, chapters):
     print("Audio files and their match scores for ebook chapters. Best < 70 or second best close to best means something might have gone wrong.")
     return [(Path(fn), info['chapter']) for fn, info in transcriptions.items()] 
 
+def pad_srt(srt_str):
+    """
+    Whisper tries to be very precise with timestamps, meaning the start and end
+    of segments can be slightly cut off. This function pads the output .srt 
+    such that each line starts PAD_SECONDS earlier and ends PAD_SECONDS later.
+    If padding would make two lines overlap, their end and start are put half-
+    way between them.
+    """
+    padtime = datetime.timedelta(seconds=PAD_SECONDS)
+    lines = list(srt.parse(srt_str))
+
+    lines[0].start = max(lines[0].start-padtime, datetime.timedelta())
+    i = 0
+    while i+1 < len(lines):
+        if lines[i].end + 2*padtime > lines[i+1].start:
+            pad = (lines[i+1].start-lines[i].end)/2
+        else: pad = padtime
+
+        lines[i].end += pad
+        lines[i+1].start -= pad
+        i += 1
+    lines[i].end += padtime
+
+    return srt.compose(lines)
 
 def align_chapter(text, audio_file, get_model, output_dir):
     """
@@ -185,8 +213,9 @@ def align_chapter(text, audio_file, get_model, output_dir):
     result = model.align(str(audio_file), text, language=LANG, original_split=True)
     
     print(f"Writing subtitles to {output_file}")
+    srt_str = pad_srt(result.to_srt_vtt(word_level=False))
     with open(output_file, 'w+') as f:
-        f.write(result.to_srt_vtt(word_level=False))
+        f.write(srt_str)
 
 
 def align_book(matched_files, output_dir):
@@ -273,7 +302,8 @@ def main():
     subtitle_dir.mkdir(parents=True, exist_ok=True)
     print("\n\nAligning matched ebook chapters to the audio files:")
     align_book(matched_files, subtitle_dir)
-    
+   
+    return
     convert_to_video(ebook, audio_files)
 
 if __name__ == "__main__":
