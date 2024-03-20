@@ -1,5 +1,7 @@
 input/
 output/
+subtitles/
+mp4/
 .srt
 
 # Byte-compiled / optimized / DLL files

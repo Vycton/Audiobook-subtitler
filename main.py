@@ -1,5 +1,6 @@
 import os
 from multiprocessing import Pool
+import argparse
 
 import json
 from pathlib import Path
@@ -18,6 +19,7 @@ SENTENCE_DELINEATORS = "。"
 TRANSCR_POOL_SIZE = 8
 TRANSCR_MODEL = 'tiny'
 ALIGN_MODEL = 'large-v3'
+
 
 def read_chapter(chapter):
     """
@@ -170,7 +172,7 @@ def align_chapter(text, audio_file, model, output_dir):
     Aligns a single ebook chapter to its corresponding audio file, and saves
     the resulting .srt file. If the .srt already exists the chapter is skipped.
     """
-    output_file = Path(output_dir + str(Path(audio_file).stem) + ".srt")
+    output_file = (output_dir / Path(audio_file).stem).with_suffix(".srt")
     if output_file.exists():
         print(f"Subtitle file {output_file.name} already exists! Skipping...")
         return
@@ -194,11 +196,17 @@ def align_book(matched_files, output_dir):
         align_chapter(text, path, model, output_dir)
 
 def main():
-    audio_dir = "./input/Book 1 mp3/"
-    output_dir = "./output/subtitles/"
-    ebook_file = './input/Book 1.epub'
+    parser = argparse.ArgumentParser( prog='audiobook-subtitler',
+        description='Combines an .epub and directory of .mp3 files to create .srt subtitles for the .mp3s')
 
+    parser.add_argument("epub_filename")
+    parser.add_argument("audiobook_directory")
+    args = parser.parse_args()
+
+    ebook_file = args.epub_filename
+    audio_dir = args.audiobook_directory
     audio_files = get_audio_files(audio_dir)
+
 
     matched_files = read_ebook_toc(ebook_file, audio_files)
     if not matched_files:
@@ -207,8 +215,10 @@ def main():
         chapters = read_ebook_plain(ebook_file)
         matched_files = match_files_transcriptions(transcriptions, chapters)
 
+    subtitle_dir = Path.cwd() / 'subtitles'
+    subtitle_dir.mkdir(parents=True, exist_ok=True)
     print("\n\nAligning matched ebook chapters to the audio files:")
-    align_book(matched_files, output_dir)
+    align_book(matched_files, subtitle_dir)
 
 if __name__ == "__main__":
     main()
