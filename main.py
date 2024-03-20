@@ -1,6 +1,7 @@
 import os
 from multiprocessing import Pool
 import argparse
+import mimetypes
 
 import json
 from pathlib import Path
@@ -13,6 +14,8 @@ import stable_whisper
 from thefuzz import fuzz, process
 
 from bs4 import BeautifulSoup
+
+from subprocess import call
 
 LANG = 'ja'
 SENTENCE_DELINEATORS = "。"
@@ -35,26 +38,26 @@ def read_chapter(chapter):
         text = text.replace(c, c+"\n")
     return text
 
-def read_ebook_plain(book_file):
+def read_ebook_plain(ebook):
     """
     Reads and ebook file and returns a list of strings containing the text of 
     each chapter.
     """
-    book = epub.read_epub(book_file, {'ignore_ncx': True})
     chapters = []
-    for ch in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+    for ch in ebook.get_items_of_type(ebooklib.ITEM_DOCUMENT):
         chapters.append(read_chapter(ch.get_content()))
     return chapters
 
-def read_ebook_toc(book_file, audio_files):
+def read_ebook_toc(ebook, audio_files):
     """
     Reads and ebook file and tries to match chapters to the provided audio
     files by searching for links with link text inside the book.
     Prompts the user whether the matches are correct, 
     and returns None if they are not.
+
+    TODO: Should be changed so it uses the navigation item in the ebook.
     """
-    book = epub.read_epub(book_file, {'ignore_ncx': True})
-    chapters = [x for x in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
+    chapters = [x for x in ebook.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
     link_tags = []
     for ch in chapters:
         linksoup = BeautifulSoup(ch.get_content(),"html.parser")
@@ -63,7 +66,7 @@ def read_ebook_toc(book_file, audio_files):
     table_links = []
     links = []
     links_text = []
-    chapter_names = [ch.get_name() for ch in book.get_items()]
+    chapter_names = [ch.get_name() for ch in ebook.get_items()]
     for l in link_tags:
         table_link = l.get('href') 
         matched_name = process.extractOne(table_link, chapter_names)[0] 
@@ -78,8 +81,8 @@ def read_ebook_toc(book_file, audio_files):
         match_list.append((path, links[match_i], table_links[match_i], links_text[match_i]))
 
     print("\n".join(f"{p.name} -> {ltext} ({table_link} -> {link})" for p, link, table_link, ltext in match_list))
-    answer = input("\nIf the [audio file -> ebook chapter] and [table of contents link -> chapter link] pairs above are correct "+
-            "alignment can begin. If not, matches will have to be made by transcribing " +
+    answer = input("\nIf the [audio file -> ebook chapter] and [table of contents link -> chapter link] pairs above are correct "+\
+            "alignment can begin. If not, matches will have to be made by transcribing " +\
             "the audio files, which will take some time (5-10 minutes). Do the above matches seem correct? [Y/n]")
 
     if answer.lower() == "n":
@@ -87,7 +90,7 @@ def read_ebook_toc(book_file, audio_files):
 
     out_list = []
     for path, link, _, _ in match_list:
-        chapter = book.get_item_with_href(link)
+        chapter = ebook.get_item_with_href(link)
         chaptertext = read_chapter(chapter.get_content())
         out_list.append((path, chaptertext))
 
@@ -167,7 +170,7 @@ def match_files_transcriptions(transcriptions, chapters):
     return [(Path(fn), info['chapter']) for fn, info in transcriptions.items()] 
 
 
-def align_chapter(text, audio_file, model, output_dir):
+def align_chapter(text, audio_file, get_model, output_dir):
     """
     Aligns a single ebook chapter to its corresponding audio file, and saves
     the resulting .srt file. If the .srt already exists the chapter is skipped.
@@ -177,6 +180,7 @@ def align_chapter(text, audio_file, model, output_dir):
         print(f"Subtitle file {output_file.name} already exists! Skipping...")
         return
 
+    model = get_model()
     print(f"\nAligning {audio_file.stem}...")
     result = model.align(str(audio_file), text, language=LANG, original_split=True)
     
@@ -190,10 +194,59 @@ def align_book(matched_files, output_dir):
     Aligns each chapter in the ebook to its corresponding audio file using a 
     model of size ALIGN_MODEL.
     """
-    print("loading model...")
-    model = stable_whisper.load_model(ALIGN_MODEL)
+    #avoid loading model unnecessarily 
+    model = None
+    def get_model():
+        nonlocal model
+        if model is None:
+            print("loading model...")
+            model = stable_whisper.load_model(ALIGN_MODEL)
+        return model
+
     for path, text in matched_files:
-        align_chapter(text, path, model, output_dir)
+        align_chapter(text, path, get_model, output_dir)
+
+
+def write_cover_image(ebook, write_dir):
+    # TODO give user option to choose image
+    score = 0
+    cover_image = None
+    for image in ebook.get_items_of_type(ebooklib.ITEM_IMAGE):
+        new_score = fuzz.ratio(image.get_name(), "cover")
+        if new_score > score:
+            score = new_score
+            cover_image = image
+
+    # TODO if cover_image is None
+    if cover_image is None:
+        print("PANIC : no images in the ebook")
+        return
+    ext = mimetypes.guess_extension(cover_image.media_type)
+    if ext is None:
+        print("PANIC: no extension for the cover image")
+        return
+    cover_filename = (write_dir/"cover_img").with_suffix(ext)
+
+    with open(cover_filename, "wb+") as f:
+        f.write(cover_image.get_content())
+
+    return cover_filename
+
+
+def convert_to_video(ebook, audio_files):
+    mp4_dir = Path.cwd() / 'mp4'
+    mp4_dir.mkdir(parents=True, exist_ok=True)
+    cover_filename = write_cover_image(ebook, mp4_dir)
+
+    for file in audio_files:
+        print(f"\nconverting to video file: {file.stem}" )
+        out_file = (mp4_dir / file.stem).with_suffix(".mp4")
+        command = f"ffmpeg -n -v quiet -stats -loop 1 -i '{cover_filename}' -i '{file}' "+\
+        f"-vf 'scale=1920:1080:force_original_aspect_ratio=decrease,"+\
+        f"pad=1920:1080:-1:-1:color=black,setsar=1,format=yuv420p' "+\
+        f"-shortest -fflags +shortest '{out_file}'"
+        call(command, shell=True)
+
 
 def main():
     parser = argparse.ArgumentParser( prog='audiobook-subtitler',
@@ -204,21 +257,24 @@ def main():
     args = parser.parse_args()
 
     ebook_file = args.epub_filename
+    ebook = epub.read_epub(ebook_file, {'ignore_ncx': True})
     audio_dir = args.audiobook_directory
     audio_files = get_audio_files(audio_dir)
 
 
-    matched_files = read_ebook_toc(ebook_file, audio_files)
+    matched_files = read_ebook_toc(ebook, audio_files)
     if not matched_files:
         print("\nMatching audio files to ebook chapters with transcription:")
         transcriptions = transcribe_audiobook(audio_dir)
-        chapters = read_ebook_plain(ebook_file)
+        chapters = read_ebook_plain(ebook)
         matched_files = match_files_transcriptions(transcriptions, chapters)
 
     subtitle_dir = Path.cwd() / 'subtitles'
     subtitle_dir.mkdir(parents=True, exist_ok=True)
     print("\n\nAligning matched ebook chapters to the audio files:")
     align_book(matched_files, subtitle_dir)
+    
+    convert_to_video(ebook, audio_files)
 
 if __name__ == "__main__":
     main()
