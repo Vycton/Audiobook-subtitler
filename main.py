@@ -303,7 +303,6 @@ def main():
     print("\n\nAligning matched ebook chapters to the audio files:")
     align_book(matched_files, subtitle_dir)
    
-    return
     convert_to_video(ebook, audio_files)
 
 if __name__ == "__main__":
