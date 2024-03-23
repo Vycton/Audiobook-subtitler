@@ -314,9 +314,6 @@ def main():
     audio_dir = args.audiobook_directory
     audio_files = get_audio_files(audio_dir)
     
-    a = read_ebook_plain(ebook)
-    return
-
     matched_files = read_ebook_toc(ebook, audio_files)
     if not matched_files:
         print("\nMatching audio files to ebook chapters with transcription:")
