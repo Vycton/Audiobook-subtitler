@@ -18,29 +18,54 @@ from bs4 import BeautifulSoup
 from subprocess import call
 
 import srt
+import re
 import datetime
 
 LANG = 'ja'
-SENTENCE_DELINEATORS = "。"
+SENTENCE_DELINEATORS = re.compile(r"([。、〜：！？）」〉](」)?|((─)+)|[\r\n]+)")
+MAX_LINE_LENGTH = 80
 TRANSCR_POOL_SIZE = 8
 TRANSCR_MODEL = 'tiny'
 ALIGN_MODEL = 'large-v3'
-PAD_SECONDS = .75
+PAD_SECONDS = .5
 
+def split_line(line):
+    """
+    Inserts line breaks into strings using SENTENCE_DELINEATORS until each line
+    is shorter than MAX_LINE_LENGTH (or no longer has a delineator in it).
+    """
+
+    if len(line) <= MAX_LINE_LENGTH:
+        return line
+    matches =  list(SENTENCE_DELINEATORS.finditer(line))
+    if not matches:
+        return line
+
+    pos = [abs(m.end() - len(line)/2) for m in matches] 
+    splitpos = matches[pos.index(min(pos))].end()
+    if splitpos >= len(line)-1:
+        return line
+    left, right = line[:splitpos], line[splitpos:]
+
+    print("\n\n\n\n", f"line:{line}\n", f"posi:{pos}\n", f"choice:{splitpos}\n", f"left:{left}\n",f"right:{right}","\n\n\n\n\n\n")
+
+    return split_line(left)+"\n"+split_line(right)
 
 def read_chapter(chapter):
     """
     Takes the html of a single ebook chapter and produces the cleaned up text,
-    adding a line break after each sentence.
+    adding a line break after each sentence and within long sentences using 
+    split_line.
     """
     soup = BeautifulSoup(chapter, 'html.parser')
-    lines = soup.get_text().split("\n")
+    text = soup.get_text()
+    text.replace('\u3000', "")
+    lines = text.split("\n") 
     lines = [x for x in lines if x]
-    lines = [x.replace('\u3000', "") for x in lines]
-    text = "\n".join(lines)
-    for c in SENTENCE_DELINEATORS:
-        text = text.replace(c, c+"\n")
+    text = "\n".join([split_line(l) for l in lines])
+
     return text
+
 
 def read_ebook_plain(ebook):
     """
@@ -126,6 +151,7 @@ def transcribe_audiobook(audio_dir):
     parallel with a pool size of TRANSCR_POOL_SIZE.
     Also creates a cache of transcripts in the audio directory, and uses that
     cache if it exists, skipping transcription.
+    TODO: create chapter-level cache inside a .transcription-cache directory
     """
     cache_file = Path(audio_dir+".transcription-cache.json")
     if cache_file.is_file():
@@ -289,7 +315,9 @@ def main():
     ebook = epub.read_epub(ebook_file, {'ignore_ncx': True})
     audio_dir = args.audiobook_directory
     audio_files = get_audio_files(audio_dir)
-
+    
+    a = read_ebook_plain(ebook)
+    return
 
     matched_files = read_ebook_toc(ebook, audio_files)
     if not matched_files:
