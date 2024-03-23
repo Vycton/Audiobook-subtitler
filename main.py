@@ -47,8 +47,6 @@ def split_line(line):
         return line
     left, right = line[:splitpos], line[splitpos:]
 
-    print("\n\n\n\n", f"line:{line}\n", f"posi:{pos}\n", f"choice:{splitpos}\n", f"left:{left}\n",f"right:{right}","\n\n\n\n\n\n")
-
     return split_line(left)+"\n"+split_line(right)
 
 def read_chapter(chapter):
