@@ -21,13 +21,18 @@ import srt
 import re
 import datetime
 
+from functools import partial
+
 LANG = 'ja'
-SENTENCE_DELINEATORS = re.compile(r"([。、〜：！？）」〉](」)?|((─)+)|[\r\n]+)")
-MAX_LINE_LENGTH = 80
+SENTENCE_END = re.compile(r"\n|(?<=。)") 
+LINE_DELINEATORS = re.compile(r"([、〜：！？）」〉](」)?|((─|…)+)|[\r\n]+)")
+MAX_LINE_LENGTH = 40
 TRANSCR_POOL_SIZE = 8
 TRANSCR_MODEL = 'tiny'
 ALIGN_MODEL = 'large-v3'
-PAD_SECONDS = .5
+TOKEN_STEP = 100
+FAST_MODE = False
+PAD_SECONDS = .25
 
 def split_line(line):
     """
@@ -37,7 +42,7 @@ def split_line(line):
 
     if len(line) <= MAX_LINE_LENGTH:
         return line
-    matches =  list(SENTENCE_DELINEATORS.finditer(line))
+    matches =  list(LINE_DELINEATORS.finditer(line))
     if not matches:
         return line
 
@@ -58,7 +63,7 @@ def read_chapter(chapter):
     soup = BeautifulSoup(chapter, 'html.parser')
     text = soup.get_text()
     text.replace('\u3000', "")
-    lines = text.split("\n") 
+    lines = SENTENCE_END.split(text)
     lines = [x for x in lines if x]
     text = "\n".join([split_line(l) for l in lines])
 
@@ -133,15 +138,23 @@ def get_audio_files(audio_dir):
             files.append(Path(audio_dir+file))
     return files
 
-def transcribe_chapter(audio_file):
+def transcribe_chapter(cache_dir, audio_file):
     """
     Creates a transcript of the provided audio file using the TRANSCR_MODEL 
     model. Transcripts are only used to match audio files to the correct ebook
     chapter, so they do not need to be very accurate.
     """
-    model = stable_whisper.load_model(TRANSCR_MODEL)
-    result = model.transcribe(str(audio_file), language=LANG)
-    return (audio_file, result.to_txt())
+    cache_file = cache_dir / Path(audio_file.stem + ".txt")
+    if cache_file.exists():
+        print(f"Reading transcript cache at {cache_file}")
+        with open(cache_file,'r') as f:
+            result = f.read()
+    else:
+        model = stable_whisper.load_model(TRANSCR_MODEL)
+        result = model.transcribe(str(audio_file), language=LANG).to_txt()
+        with open(cache_file,'w+') as f:
+            f.write(result)
+    return (audio_file, result)
 
 def transcribe_audiobook(audio_dir):
     """
@@ -151,26 +164,22 @@ def transcribe_audiobook(audio_dir):
     cache if it exists, skipping transcription.
     TODO: create chapter-level cache inside a .transcription-cache directory
     """
-    cache_file = Path(audio_dir+".transcription-cache.json")
-    if cache_file.is_file():
-        print("reading transcripts from cache at "+str(cache_file))
-        with open(cache_file, 'r') as f:
-            transcriptions = json.load(f)
-        return transcriptions
+
+    cache_dir = Path(audio_dir) / ".transcription-cache"
+    if not cache_dir.exists():
+        cache_dir.mkdir()
         
-    files = [str(f) for f in get_audio_files(audio_dir)] #so it works with json
+    files = get_audio_files(audio_dir)
     print("loading models and transcribing (ignore jumping progress bar)...")
+    transfunc = partial(transcribe_chapter, cache_dir)
     with Pool(TRANSCR_POOL_SIZE) as p:
-        transcriptions = p.map(transcribe_chapter,files)
+        transcriptions = p.map(transfunc,files)
 
     transcriptions = {
             t[0]:{'transcript':t[1], 'chapter':"", 'best':0, 'second':0}
             for t in transcriptions
             }
 
-    with open(cache_file, 'w+') as f:
-        print("writing transcripts to cache at "+str(cache_file))
-        json.dump(transcriptions, f, ensure_ascii=False)
     return transcriptions
 
 def match_files_transcriptions(transcriptions, chapters):
@@ -208,15 +217,17 @@ def pad_srt(srt_str):
     padtime = datetime.timedelta(seconds=PAD_SECONDS)
     lines = list(srt.parse(srt_str))
 
-    lines[0].start = max(lines[0].start-padtime, datetime.timedelta())
+    #lines[0].start = max(lines[0].start-padtime, datetime.timedelta())
     i = 0
     while i+1 < len(lines):
-        if lines[i].end + 2*padtime > lines[i+1].start:
-            pad = (lines[i+1].start-lines[i].end)/2
-        else: pad = padtime
+        #if lines[i].end + 2*padtime > lines[i+1].start:
+        #    pad = (lines[i+1].start-lines[i].end)/2
+        #else: pad = padtime
+
+        pad = min(padtime, lines[i+1].start-lines[i].end)
 
         lines[i].end += pad
-        lines[i+1].start -= pad
+        #lines[i+1].start -= pad
         i += 1
     lines[i].end += padtime
 
@@ -234,7 +245,7 @@ def align_chapter(text, audio_file, get_model, output_dir):
 
     model = get_model()
     print(f"\nAligning {audio_file.stem}...")
-    result = model.align(str(audio_file), text, language=LANG, original_split=True)
+    result = model.align(str(audio_file), text, language=LANG, original_split=True, fast_mode=FAST_MODE, token_step=TOKEN_STEP)
     
     print(f"Writing subtitles to {output_file}")
     srt_str = pad_srt(result.to_srt_vtt(word_level=False))
@@ -314,7 +325,10 @@ def main():
     audio_dir = args.audiobook_directory
     audio_files = get_audio_files(audio_dir)
     
-    matched_files = read_ebook_toc(ebook, audio_files)
+    try:
+        matched_files = read_ebook_toc(ebook, audio_files)
+    except:
+        matched_files = None
     if not matched_files:
         print("\nMatching audio files to ebook chapters with transcription:")
         transcriptions = transcribe_audiobook(audio_dir)
